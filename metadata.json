@@ -1,0 +1,9 @@
+{
+  "name": "OMNIBOT AI - Global Automation Suite",
+  "description": "Enterprise-grade AI business automation platform for cross-platform sales funnels, unified customer engagement, and real-time sentiment analysis.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}
