@@ -1,157 +1,84 @@
 import { create } from 'zustand';
 import { PricingTier } from '../../types';
+import {
+  UsageData,
+  UsageKind,
+  getInitialUsage,
+  incrementUsage,
+  isWithinLimits as withinLimits,
+  getRemaining as remaining,
+  getUsagePercentage as usagePercentage,
+  shouldResetMonthly,
+} from '../lib/quota';
 
-export interface UsageData {
-  conversations: number;
-  creative: number;
-  lastReset: string; // ISO date string
-}
+export type { UsageData } from '../lib/quota';
 
 interface UsageStore {
   currentUsage: UsageData;
-  
-  // Increment usage after successful generation
-  increment: (type: 'conversation' | 'creative') => void;
-  
-  // Reset usage at monthly interval
+  increment: (type: UsageKind) => void;
   resetMonthly: () => void;
-  
-  // Check if usage is within tier limits
   isWithinLimits: (tier: PricingTier) => boolean;
-  
-  // Get remaining quota for a specific type
-  getRemaining: (type: 'conversation' | 'creative', tier: PricingTier) => number;
-  
-  // Get usage percentage (for progress bars)
-  getUsagePercentage: (type: 'conversation' | 'creative', tier: PricingTier) => number;
-  
-  // Load from localStorage
+  getRemaining: (type: UsageKind, tier: PricingTier) => number;
+  getUsagePercentage: (type: UsageKind, tier: PricingTier) => number;
   loadFromStorage: () => void;
-  
-  // Save to localStorage
   saveToStorage: () => void;
 }
 
 const STORAGE_KEY = 'omnibot_usage_data';
-const USAGE_RESET_DATE_KEY = 'omnibot_usage_reset_date';
-
-// Get the first day of current month
-const getFirstDayOfMonth = () => {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
-};
-
-// Check if monthly reset is needed
-const shouldResetMonthly = (lastReset: string): boolean => {
-  const lastResetDate = new Date(lastReset);
-  const now = new Date();
-  
-  return (
-    lastResetDate.getFullYear() !== now.getFullYear() ||
-    lastResetDate.getMonth() !== now.getMonth()
-  );
-};
-
-const getInitialUsage = (): UsageData => {
-  return {
-    conversations: 0,
-    creative: 0,
-    lastReset: getFirstDayOfMonth(),
-  };
-};
 
 export const useUsageStore = create<UsageStore>((set, get) => ({
   currentUsage: getInitialUsage(),
 
-  increment: (type: 'conversation' | 'creative') => {
-    const store = get();
-    
-    // Check if monthly reset is needed
-    if (shouldResetMonthly(store.currentUsage.lastReset)) {
-      store.resetMonthly();
-      return;
-    }
-
-    set((state) => ({
-      currentUsage: {
-        ...state.currentUsage,
-        [type === 'conversation' ? 'conversations' : 'creative']:
-          type === 'conversation'
-            ? state.currentUsage.conversations + 1
-            : state.currentUsage.creative + 1,
-      },
-    }));
-
-    // Auto-save to localStorage
+  increment: (type: UsageKind) => {
+    // The rollover is handled inside incrementUsage, so the action that starts a
+    // new month is still counted instead of being swallowed by the reset.
+    set((state) => ({ currentUsage: incrementUsage(state.currentUsage, type) }));
     get().saveToStorage();
   },
 
   resetMonthly: () => {
-    const newUsage = getInitialUsage();
-    set({ currentUsage: newUsage });
+    set({ currentUsage: getInitialUsage() });
     get().saveToStorage();
-    console.log('[UsageStore] Monthly usage reset');
   },
 
-  isWithinLimits: (tier: PricingTier) => {
-    const store = get();
-    const usage = store.currentUsage;
+  isWithinLimits: (tier: PricingTier) => withinLimits(get().currentUsage, tier),
 
-    const conversationsOk = usage.conversations < tier.limitConversations;
-    const creativeOk = usage.creative < tier.limitCreative;
+  getRemaining: (type: UsageKind, tier: PricingTier) =>
+    remaining(get().currentUsage, type, tier),
 
-    return conversationsOk && creativeOk;
-  },
-
-  getRemaining: (type: 'conversation' | 'creative', tier: PricingTier) => {
-    const store = get();
-    const usage = store.currentUsage;
-
-    if (type === 'conversation') {
-      return Math.max(0, tier.limitConversations - usage.conversations);
-    } else {
-      return Math.max(0, tier.limitCreative - usage.creative);
-    }
-  },
-
-  getUsagePercentage: (type: 'conversation' | 'creative', tier: PricingTier) => {
-    const store = get();
-    const usage = store.currentUsage;
-
-    const limit = type === 'conversation' ? tier.limitConversations : tier.limitCreative;
-    const current = type === 'conversation' ? usage.conversations : usage.creative;
-
-    if (limit === 0) return 0;
-    return Math.min(100, (current / limit) * 100);
-  },
+  getUsagePercentage: (type: UsageKind, tier: PricingTier) =>
+    usagePercentage(get().currentUsage, type, tier),
 
   loadFromStorage: () => {
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        const usage = JSON.parse(stored) as UsageData;
-        
-        // Check if monthly reset is needed
-        if (shouldResetMonthly(usage.lastReset)) {
-          set({ currentUsage: getInitialUsage() });
-        } else {
-          set({ currentUsage: usage });
-        }
+      if (!stored) return;
+      const usage = JSON.parse(stored) as UsageData;
+      if (
+        typeof usage?.conversations !== 'number' ||
+        typeof usage?.creative !== 'number' ||
+        typeof usage?.lastReset !== 'string'
+      ) {
+        // Corrupt or old-shape data: start clean rather than spread NaN.
+        set({ currentUsage: getInitialUsage() });
+        return;
       }
+      set({
+        currentUsage: shouldResetMonthly(usage.lastReset) ? getInitialUsage() : usage,
+      });
     } catch (error) {
       console.error('[UsageStore] Failed to load from localStorage:', error);
+      set({ currentUsage: getInitialUsage() });
     }
   },
 
   saveToStorage: () => {
     try {
-      const store = get();
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(store.currentUsage));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(get().currentUsage));
     } catch (error) {
       console.error('[UsageStore] Failed to save to localStorage:', error);
     }
   },
 }));
 
-// Initialize store from localStorage on app start
 useUsageStore.getState().loadFromStorage();
